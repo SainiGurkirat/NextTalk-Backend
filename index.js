@@ -18,7 +18,7 @@ const app = express();
 
 // --- Standard Express Middleware ---
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000', // Allow your frontend to connect
+    origin: process.env.CLIENT_URL || 'http://localhost:3000', // Allow your frontend to connect
     credentials: true // Important for cookies, if you were using them for auth
 }));
 app.use(express.json()); // Parses JSON bodies of incoming requests
@@ -31,7 +31,7 @@ const server = http.createServer(app);
 // Initialize Socket.IO server
 const io = new Server(server, {
     cors: {
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000', // Allow your frontend to connect
+        origin: process.env.CLIENT_URL || 'http://localhost:3000', // Allow your frontend to connect
         methods: ["GET", "POST"] // Specify allowed HTTP methods for CORS
     }
 });
