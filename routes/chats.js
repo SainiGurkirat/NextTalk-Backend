@@ -7,21 +7,16 @@ const authenticateToken = require('../middleware/auth'); // Your JWT authenticat
 // Route to create a new chat (private or group)
 // Accessible at: POST /api/chats
 router.post('/', authenticateToken, async (req, res) => {
-    // --- ADD THIS LINE FOR DEBUGGING ---
     console.log('DEBUG (Backend/createChat): req.user object:', req.user);
-    // ------------------------------------
 
     try {
         const { participantIds, type, name } = req.body;
-        // CORRECTED: Use req.user.userId to match the actual JWT payload structure
-        const currentUserId = req.user.userId; 
+        const currentUserId = req.user.userId; // Assuming req.user.userId from your auth middleware
 
         console.log('DEBUG (Backend/createChat): Incoming participantIds from frontend:', participantIds);
         console.log('DEBUG (Backend/createChat): Current User ID (from JWT):', currentUserId);
         console.log('DEBUG (Backend/createChat): Requested Chat Type:', type);
 
-        // Ensure current user is always a participant
-        // IMPORTANT: Use .some() with toString() for ObjectId comparison in array
         if (!participantIds.some(id => id.toString() === currentUserId.toString())) {
             console.log('DEBUG (Backend/createChat): Current user not found in participantIds. Adding current user.');
             participantIds.push(currentUserId);
@@ -32,18 +27,15 @@ router.post('/', authenticateToken, async (req, res) => {
         console.log('DEBUG (Backend/createChat): Participant IDs AFTER current user check:', participantIds);
         console.log('DEBUG (Backend/createChat): Participant IDs length AFTER check:', participantIds.length);
 
-        // Basic validation for private chats
         if (type === 'private' && participantIds.length !== 2) {
             console.error('ERROR (Backend/createChat): Private chat validation failed. Expected 2 participants, got:', participantIds.length);
             return res.status(400).json({ message: 'Private chats must have exactly two participants.' });
         }
 
-        // For private chats, check if a chat already exists between these two users
         if (type === 'private') {
             const existingChat = await Chat.findOne({
                 type: 'private',
-                // Ensure both participants are present, and there are exactly two
-                participants: { $all: participantIds, $size: 2 } 
+                participants: { $all: participantIds, $size: 2 }
             });
             if (existingChat) {
                 console.log('DEBUG (Backend/createChat): Existing private chat found:', existingChat._id);
@@ -53,8 +45,8 @@ router.post('/', authenticateToken, async (req, res) => {
 
         const newChat = new Chat({
             participants: participantIds,
-            type: type || 'private', // Default to private if not specified
-            name: type === 'group' ? name : undefined // Only set name for group chats
+            type: type || 'private',
+            name: type === 'group' ? name : undefined
         });
         await newChat.save();
 
@@ -74,11 +66,20 @@ router.post('/', authenticateToken, async (req, res) => {
 // Accessible at: GET /api/chats
 router.get('/', authenticateToken, async (req, res) => {
     try {
-        // CORRECTED: Use req.user.userId to match the actual JWT payload structure
-        const currentUserId = req.user.userId; 
+        const currentUserId = req.user.userId; // Assuming req.user.userId from your auth middleware
         const chats = await Chat.find({ participants: currentUserId })
-            .populate('participants', 'username profilePicture') // Populate participant details
-            .sort({ 'lastMessage.timestamp': -1 }); // Sort by last message time, descending
+            .populate('participants', 'username profilePicture')
+            // --- POPULATING LASTMESSAGE AND ITS SENDER/CONTENT ---
+            .populate({
+                path: 'lastMessage',
+                select: 'content timestamp sender',
+                populate: {
+                    path: 'sender',
+                    select: 'username _id profilePicture' // Ensure _id is selected for comparison on frontend
+                }
+            })
+            // -------------------------------------------------------------
+            .sort({ 'updatedAt': -1, 'lastMessage.timestamp': -1 }); // Sort by chat update time first, then last message time
 
         res.status(200).json(chats);
     } catch (error) {
@@ -92,18 +93,16 @@ router.get('/', authenticateToken, async (req, res) => {
 router.get('/:chatId/messages', authenticateToken, async (req, res) => {
     try {
         const { chatId } = req.params;
-        // CORRECTED: Use req.user.userId to match the actual JWT payload structure
-        const currentUserId = req.user.userId; 
+        const currentUserId = req.user.userId; // Assuming req.user.userId from your auth middleware
 
-        // Verify user is a participant of the chat for security
         const chat = await Chat.findById(chatId);
-        if (!chat || !chat.participants.includes(currentUserId)) {
+        if (!chat || !chat.participants.some(p => p.toString() === currentUserId.toString())) {
             return res.status(403).json({ message: 'Access denied to this chat' });
         }
 
         const messages = await Message.find({ chat: chatId })
-            .populate('sender', 'username profilePicture') // Populate sender details
-            .sort({ timestamp: 1 }); // Sort by time ascending
+            .populate('sender', 'username profilePicture')
+            .sort({ timestamp: 1 });
 
         res.status(200).json(messages);
     } catch (error) {
@@ -112,23 +111,66 @@ router.get('/:chatId/messages', authenticateToken, async (req, res) => {
     }
 });
 
-// Route to get a single chat's details by ID (useful for populating chat window)
-// Accessible at: GET /api/chats/:chatId
-router.get('/:chatId', authenticateToken, async (req, res) => {
-    try {
-        const { chatId } = req.params;
-        // CORRECTED: Use req.user.userId to match the actual JWT payload structure
-        const currentUserId = req.user.userId; 
+// --- NEW ROUTE: POST /api/chats/:chatId/messages (SEND MESSAGE) ---
+router.post('/:chatId/messages', authenticateToken, async (req, res) => {
+    const { chatId } = req.params;
+    const { content } = req.body;
+    const senderId = req.user.userId; // Assuming req.user.userId from your auth middleware
 
-        const chat = await Chat.findById(chatId)
-                                .populate('participants', 'username profilePicture');
+    if (!content || typeof content !== 'string' || content.trim() === '') {
+        return res.status(400).json({ message: 'Message content is required and cannot be empty.' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId);
 
         if (!chat) {
             return res.status(404).json({ message: 'Chat not found' });
         }
 
-        // Ensure the current user is a participant of this chat
-        // Convert to string for reliable comparison with populated ObjectId
+        if (!chat.participants.some(p => p.toString() === senderId.toString())) {
+             return res.status(403).json({ message: 'Not authorized to send messages to this chat' });
+        }
+
+        const newMessage = new Message({
+            chat: chatId,
+            sender: senderId,
+            content: content,
+            timestamp: new Date(),
+        });
+
+        const savedMessage = await newMessage.save();
+
+        // Update the chat's lastMessage field and updatedAt timestamp
+        chat.lastMessage = savedMessage._id; // This will now correctly store the Message _id
+        chat.updatedAt = new Date(); // Update chat's last activity
+        await chat.save();
+
+        // Populate sender details for the response to the frontend (for optimistic update correction)
+        await savedMessage.populate('sender', 'username _id profilePicture');
+
+        res.status(201).json(savedMessage);
+    } catch (error) {
+        console.error('Backend: Error sending message:', error);
+        res.status(500).json({ message: 'Server error while sending message' });
+    }
+});
+// ------------------------------------------------------------------
+
+// Route to get a single chat's details by ID
+// Accessible at: GET /api/chats/:chatId
+router.get('/:chatId', authenticateToken, async (req, res) => {
+    try {
+        const { chatId } = req.params;
+        const currentUserId = req.user.userId; // Assuming req.user.userId from your auth middleware
+
+        const chat = await Chat.findById(chatId)
+                               .populate('participants', 'username profilePicture');
+
+        if (!chat) {
+            return res.status(404).json({ message: 'Chat not found' });
+        }
+
         if (!chat.participants.some(p => p._id.toString() === currentUserId.toString())) {
             return res.status(403).json({ message: 'Access denied to this chat' });
         }
