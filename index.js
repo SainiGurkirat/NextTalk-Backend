@@ -1,89 +1,115 @@
-// backend/server.js
+// backend/index.js
 const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
 const dotenv = require('dotenv');
-const http = require('http'); // Import http module
-const { Server } = require('socket.io'); // Import Socket.IO Server
+const mongoose = require('mongoose'); // Make sure mongoose is imported for DB connection
+const http = require('http'); // Required for Socket.IO
+const { Server } = require('socket.io'); // Socket.IO Server
+const jwt = require('jsonwebtoken'); // For Socket.IO auth
 
-// Import routes
+// Import routes (assuming they are directly in the routes folder and contain logic)
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const chatRoutes = require('./routes/chats');
+const messageRoutes = require('./routes/messages'); // Corrected import path
 
-// Load environment variables from .env file
+// Import Models (needed for Socket.IO logic directly in index.js)
+const User = require('./models/User');
+const Chat = require('./models/Chat');
+const Message = require('./models/Message');
+
+
 dotenv.config();
 
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI) // Assuming MONGODB_URI in .env
+    .then(() => console.log('MongoDB connected'))
+    .catch(err => console.error('MongoDB connection error:', err));
+
 const app = express();
+const server = http.createServer(app); // Create HTTP server from express app
 
-// --- Standard Express Middleware ---
-app.use(cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:3000', // Allow your frontend to connect
-    credentials: true // Important for cookies, if you were using them for auth
-}));
-app.use(express.json()); // Parses JSON bodies of incoming requests
+// Middleware to parse JSON bodies
+app.use(express.json());
 
-// --- HTTP Server and Socket.IO Initialization ---
-// Create an HTTP server from the Express app.
-// Socket.IO needs to be attached to an HTTP server directly.
-const server = http.createServer(app);
+// CORS setup (important for frontend communication)
+// This should be before your routes
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CLIENT_URL || 'http://localhost:3000'); // Allow your frontend origin
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', true); // Important for cookies/credentials if you use them
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200); // Handle pre-flight requests
+    }
+    next();
+});
 
-// Initialize Socket.IO server
+// Define API Routes
+// The '/api' prefix is added here, so authRoutes will handle '/api/auth/*'
+app.use('/api/auth', authRoutes); // THIS IS CRUCIAL FOR /api/auth/login
+app.use('/api/users', userRoutes);
+app.use('/api/chats', chatRoutes);
+app.use('/api/messages', messageRoutes);
+
+// Basic root route for testing server status
+app.get('/', (req, res) => {
+    res.send('API is running...');
+});
+
+// Socket.IO Setup
 const io = new Server(server, {
     cors: {
-        origin: process.env.CLIENT_URL || 'http://localhost:3000', // Allow your frontend to connect
-        methods: ["GET", "POST"] // Specify allowed HTTP methods for CORS
+        origin: process.env.CLIENT_URL || 'http://localhost:3000',
+        methods: ['GET', 'POST'], // Allow GET/POST for handshake
+        credentials: true
     }
 });
 
-// --- CRITICAL: Socket.IO Middleware to Attach 'io' to Request Object ---
-// This middleware runs for every incoming HTTP request.
-// It attaches the `io` (Socket.IO server) instance to the `req` object,
-// making `req.io` available in all subsequent route handlers.
-// This MUST be placed BEFORE any routes that need to use `req.io`.
-app.use((req, res, next) => {
-    req.io = io; // Attach the Socket.IO instance
-    next();      // Pass control to the next middleware or route handler
+// Socket.IO Authentication Middleware (optional, but good for securing sockets)
+io.use(async (socket, next) => {
+    const token = socket.handshake.query.token;
+    if (!token) {
+        return next(new Error('Authentication error: No token provided'));
+    }
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        socket.user = await User.findById(decoded.id).select('-password');
+        if (!socket.user) {
+            return next(new Error('Authentication error: User not found'));
+        }
+        next();
+    } catch (error) {
+        if (error.name === 'TokenExpiredError') {
+            return next(new Error('Authentication error: Token expired'));
+        }
+        next(new Error('Authentication error: Invalid token'));
+    }
 });
-// --- END CRITICAL SECTION ---
 
-
-// --- Define API Routes ---
-// These routes will now have `req.io` available thanks to the middleware above.
-app.use('/api/auth', authRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/chats', chatRoutes); // Your chat routes that emit socket events
-
-// --- Database Connection ---
-mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('MongoDB connected'))
-    .catch(err => console.error('MongoDB connection error:', err)); // Added more descriptive error
-
-// --- Socket.IO Connection Logic ---
-// This handles WebSocket connections and events
 io.on('connection', (socket) => {
-    console.log(`Socket.IO: User connected - Socket ID: ${socket.id}`);
+    console.log(`Socket.IO: User connected - ${socket.user ? socket.user.username : 'Unauthorized'} (${socket.id})`);
 
-    // Event listener for a client joining a specific chat room
+    // Register user with their socket ID (for targeted messages)
+    if (socket.user) {
+        socket.join(`user_${socket.user._id.toString()}`);
+        console.log(`Socket.IO: User ${socket.user.username} registered to personal room.`);
+    }
+
     socket.on('join_chat', (chatId) => {
         socket.join(chatId);
-        console.log(`Socket.IO: User ${socket.id} joined chat room: ${chatId}`);
+        console.log(`Socket.IO: User ${socket.user ? socket.user.username : 'Unknown'} (${socket.id}) joined chat room: ${chatId}`);
     });
 
-    // Event listener for a client disconnecting
+    socket.on('leave_chat', (chatId) => {
+        socket.leave(chatId);
+        console.log(`Socket.IO: User ${socket.user ? socket.user.username : 'Unknown'} (${socket.id}) left chat room: ${chatId}`);
+    });
+
     socket.on('disconnect', () => {
-        console.log(`Socket.IO: User disconnected - Socket ID: ${socket.id}`);
+        console.log(`Socket.IO: User disconnected - ${socket.user ? socket.user.username : 'Unknown'} (${socket.id})`);
+        // No need to explicitly leave rooms here, socket.io handles it on disconnect
     });
-
-    // You can add other socket event listeners here if needed,
-    // but message sending is primarily handled by the REST API then emitted.
 });
 
-
-// --- Server Start ---
 const PORT = process.env.PORT || 5000;
-
-// Start the HTTP server (which Socket.IO is attached to)
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

@@ -1,76 +1,104 @@
+// backend/routes/auth.js
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const bcrypt = require('bcryptjs');
+const User = require('../models/User'); // Ensure correct path to your User model
+const protect = require('../middleware/auth'); // Ensure correct path to your auth middleware
 
+// Helper function to generate JWT
+const generateToken = (id) => {
+    return jwt.sign({ id }, process.env.JWT_SECRET, {
+        expiresIn: '1d', // Token expires in 1 day
+    });
+};
 
+// @route   POST /api/auth/register
+// @desc    Register new user
+// @access  Public
 router.post('/register', async (req, res) => {
+    const { username, email, password } = req.body;
 
-    try {
-        const { username, email, password } = req.body;
-        if (!username || !email || !password) {
-            return res.status(400).json({ message: "All fields are required" });
-        }
-
-        const existingUser = await User.findOne({ $or: [{ username }, { email }] });
-        if (existingUser) {
-            return res.status(400).json({ message: "Username or email already exists" });
-        }
-
-        const  Hashedpassword = await bcrypt.hash(password, 10);
-
-        const newUser = new User({
-            username,
-            email,
-            password: Hashedpassword
-        });
-        await newUser.save();
-
-        res.status(201).json({ message: "User registered successfully" });
-
-    }catch (error) {
-        console.error("Error during registration:", error);
-        res.status(500).json({ message: "Internal server error" });
+    if (!username || !email || !password) {
+        return res.status(400).json({ message: 'Please enter all fields' });
     }
 
-});
-
-router.post('/login', async (req, res) => {
-    try{
-        const { email, password } = req.body;
-        if (!email || !password) {
-            return res.status(400).json({ message: "Email and password are required" });
+    try {
+        // Check if user exists
+        const userExists = await User.findOne({ email });
+        if (userExists) {
+            return res.status(400).json({ message: 'User already exists' });
         }
 
-        const user = await User.findOne({ email });
-        if (!user) {
-            return res.status(400).json({ message: "Invalid credentials" });
-        }
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
 
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) {
-            return res.status(400).json({ message: "Invalid credentials" });
-        }
-
-        const token = jwt.sign(
-            { userId: user._id }, 
-            process.env.JWT_SECRET, 
-            { expiresIn: '1d' }
-        );
-
-        res.status(200).json({ 
-            message: 'Logged in successfully', 
-            token, 
-            userId: user._id, 
-            username: user.username 
+        // Create user
+        const user = await User.create({
+            username,
+            email,
+            password: hashedPassword,
         });
 
+        if (user) {
+            res.status(201).json({
+                _id: user.id,
+                username: user.username,
+                email: user.email,
+                token: generateToken(user._id),
+            });
+        } else {
+            res.status(400).json({ message: 'Invalid user data' });
+        }
     } catch (error) {
-        console.error('Login error:', error);
+        console.error('Error registering user:', error);
+        res.status(500).json({ message: 'Server error during registration' });
+    }
+});
+
+// @route   POST /api/auth/login
+// @desc    Authenticate a user
+// @access  Public
+router.post('/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    try {
+        // Check for user email
+        const user = await User.findOne({ email });
+
+        // Check password
+        if (user && (await bcrypt.compare(password, user.password))) {
+            res.json({
+                _id: user.id,
+                username: user.username,
+                email: user.email,
+                profilePicture: user.profilePicture, // Include profile picture
+                token: generateToken(user._id),
+            });
+        } else {
+            res.status(400).json({ message: 'Invalid credentials' });
+        }
+    } catch (error) {
+        console.error('Error logging in user:', error);
         res.status(500).json({ message: 'Server error during login' });
     }
 });
 
+// @route   GET /api/auth/me
+// @desc    Get user data
+// @access  Private
+router.get('/me', protect, async (req, res) => {
+    // req.user is set by the protect middleware
+    if (!req.user) {
+        return res.status(401).json({ message: 'Not authorized, user data not found' });
+    }
+    res.json({
+        _id: req.user._id,
+        username: req.user.username,
+        email: req.user.email,
+        profilePicture: req.user.profilePicture, // Include profile picture
+    });
+});
 
 module.exports = router;

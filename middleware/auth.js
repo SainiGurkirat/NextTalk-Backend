@@ -1,21 +1,38 @@
+// backend/middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
+const User = require('../models/User'); // Ensure correct path to your User model
 
-const authenticationtoken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+const protect = async (req, res, next) => {
+    let token;
 
-    if(!token) {
-        return res.status(401).json({ message: 'Access denied, no token provided' });
+    // Check if token is in headers
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+        try {
+            // Get token from header
+            token = req.headers.authorization.split(' ')[1];
+
+            // Verify token
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+            // Get user from the token and attach to request object
+            req.user = await User.findById(decoded.id).select('-password'); // Exclude password field
+            if (!req.user) {
+                return res.status(401).json({ message: 'Not authorized, user not found' });
+            }
+
+            next(); // Proceed to the next middleware/route handler
+        } catch (error) {
+            console.error('Auth middleware error:', error);
+            if (error.name === 'TokenExpiredError') {
+                return res.status(401).json({ message: 'Not authorized, token expired' });
+            }
+            return res.status(401).json({ message: 'Not authorized, token failed' });
+        }
     }
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if(err) {
-            return res.status(403).json({ message: 'Invalid token' });
-        }
-        req.user = user;
-        next();
-    });
+    if (!token) {
+        return res.status(401).json({ message: 'Not authorized, no token' });
+    }
+};
 
-}
-
-module.exports = authenticationtoken;
+module.exports = protect;
