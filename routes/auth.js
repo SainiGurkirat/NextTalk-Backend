@@ -63,42 +63,36 @@ router.post('/register', async (req, res) => {
 // @access  Public
 router.post('/login', async (req, res) => {
     const { email, password } = req.body;
+    console.log(`[BACKEND LOGIN] Attempting login for email: ${email}`);
 
     try {
-        // Check if user exists
-        let user = await User.findOne({ email });
+        const user = await User.findOne({ email });
         if (!user) {
+            console.log(`[BACKEND LOGIN] User not found for email: ${email}`);
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
-        // Compare password
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
+            console.log(`[BACKEND LOGIN] Password mismatch for user: ${email}`);
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
-        // Create and return JWT
-        const payload = {
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        console.log(`[BACKEND LOGIN] User ${user.username} logged in. Token generated: ${token ? 'YES' : 'NO'}`);
+        console.log(`[BACKEND LOGIN] Sending response with token for user: ${user.username}`);
+
+        res.json({
+            token,
             user: {
-                id: user.id,
+                _id: user._id,
                 username: user.username,
                 email: user.email,
                 profilePicture: user.profilePicture
             }
-        };
-
-        jwt.sign(
-            payload,
-            process.env.JWT_SECRET,
-            { expiresIn: '1h' },
-            (err, token) => {
-                if (err) throw err;
-                res.json({ token, message: 'Login successful!' });
-            }
-        );
-
+        });
     } catch (err) {
-        console.error(err.message);
+        console.error('[BACKEND LOGIN ERROR]:', err.message);
         res.status(500).send('Server Error');
     }
 });
