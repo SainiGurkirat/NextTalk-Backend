@@ -1,3 +1,4 @@
+// backend/routes/chats.js
 const express = require('express');
 const router = express.Router();
 const Chat = require('../models/Chat');
@@ -9,7 +10,11 @@ const mongoose = require('mongoose'); // Make sure this import is present
 
 // Helper function to determine if a user is an admin of a chat
 const isAdmin = (chat, userId) => {
-    return chat.admins.some(adminId => adminId.toString() === userId.toString());
+    // Ensure chat.admins is an array and contains valid ObjectIds before mapping
+    if (!Array.isArray(chat.admins)) {
+        return false;
+    }
+    return chat.admins.some(adminId => adminId && adminId.toString() === userId.toString());
 };
 
 
@@ -17,74 +22,155 @@ const isAdmin = (chat, userId) => {
 // @desc    Get all chats for the authenticated user
 // @access  Private
 router.get('/', authMiddleware, async (req, res) => {
-    try {
-        const chats = await Chat.find({ participants: req.user.id })
-            .populate('participants', 'username profilePicture') // Populate all participants
-            .populate({
-                path: 'lastMessage',
-                populate: {
-                    path: 'sender',
-                    select: 'username profilePicture'
-                }
-            })
-            .sort({ updatedAt: -1 }); // Sort by most recently updated
+    console.log('[BACKEND CHATS] Received GET /api/chats request.');
+    console.log('[BACKEND CHATS] User from authMiddleware:', req.user);
 
-        // For private chats, find the other participant to display their name/image
+    if (!req.user || !req.user.id) {
+        console.error('[BACKEND CHATS ERROR]: authMiddleware failed to attach user or user ID.');
+        return res.status(401).json({ message: 'Unauthorized: User not authenticated.' });
+    }
+
+    try {
+        let chats;
+        try {
+            // Modify the populate for lastMessage and sender
+            chats = await Chat.find({ participants: req.user.id })
+                .populate('participants', 'username profilePicture')
+                .populate({
+                    path: 'lastMessage',
+                    // Adding `strictPopulate: false` here is a temporary workaround
+                    // if you suspect a bad reference, but it might just hide the problem.
+                    // A better approach is often to find and fix the bad data.
+                    // For now, let's keep the structured populate.
+                    // For now, let's keep the structured populate.
+                    populate: {
+                        path: 'sender',
+                        select: 'username profilePicture',
+                        // This option ensures Mongoose returns null for `sender`
+                        // if the referenced user document doesn't exist, instead of throwing an error.
+                        // However, it might still throw if the `lastMessage` field itself is malformed.
+                        // We need to ensure that the _id for sender is valid before populating.
+                        // Mongoose usually handles this.
+                    }
+                })
+                .sort({ updatedAt: -1 });
+
+            // CRITICAL DEBUG: If 'Raw populated chats received from DB'
+            // still does not appear, the issue is within the .populate() chain itself
+            // or directly before it, indicating bad data in the DB.
+            console.log('[BACKEND CHATS] Successfully executed query. Raw populated chats received from DB:', JSON.stringify(chats, (key, value) => {
+                if (value && typeof value === 'object' && value.constructor.name === 'ObjectId') {
+                    return value.toString();
+                }
+                if (value instanceof Map) {
+                    return Array.from(value.entries());
+                }
+                return value;
+            }, 2));
+
+        } catch (queryError) {
+            console.error('[BACKEND CHATS] Error during MongoDB query (find/populate):', queryError.message);
+            console.error('[BACKEND CHATS] Query Error Stack:', queryError.stack);
+            throw new Error(`Failed to fetch chats from database: ${queryError.message}`);
+        }
+
+        if (!Array.isArray(chats)) {
+            console.error('[BACKEND CHATS] Chats is not an array after query:', chats);
+            return res.status(500).json({ message: 'Server Error: Chats data is malformed after query.' });
+        }
+
         const formattedChats = chats.map(chat => {
+            // ... (rest of your map function - no changes needed here as the error was before this) ...
+            console.log(`[BACKEND CHATS] Mapping chat: ${chat?._id?.toString() || 'unknown ID'}`);
+            console.log('[BACKEND CHATS] Current chat object:', JSON.stringify(chat, (key, value) => {
+                if (value && typeof value === 'object' && value.constructor.name === 'ObjectId') {
+                    return value.toString();
+                }
+                if (value instanceof Map) {
+                    return Array.from(value.entries());
+                }
+                return value;
+            }, 2));
+
+            // Ensure chat itself is an object and has an _id before proceeding
+            if (!chat || !chat._id) {
+                console.warn('[BACKEND CHATS] Skipping malformed chat (no _id):', chat);
+                return null;
+            }
+
             let recipient = null;
             if (chat.type === 'private') {
-                recipient = chat.participants.find(p => p._id.toString() !== req.user.id.toString());
-                // Handle case where it's a self-chat (only one participant)
-                if (!recipient && chat.participants.length === 1 && chat.participants[0]._id.toString() === req.user.id.toString()) {
-                     recipient = chat.participants[0]; // Treat self as recipient
+                if (Array.isArray(chat.participants)) {
+                    recipient = chat.participants.find(p => p?._id?.toString() !== req.user.id.toString());
+                    if (!recipient && chat.participants.length === 1 && chat.participants[0] && chat.participants[0]._id?.toString() === req.user.id.toString()) {
+                        recipient = chat.participants[0];
+                    }
+                } else {
+                    console.warn(`[BACKEND CHATS] Warning: chat.participants is not an array for chat ID: ${chat._id}`);
                 }
             }
 
-            // Calculate unread count for each chat
             let unreadCount = 0;
-            if (chat.lastMessage && chat.lastMessage.sender.toString() !== req.user.id.toString()) {
-                // If the last message is not from the current user and current user hasn't read it
-                if (!chat.lastMessage.readBy.includes(req.user.id)) {
-                    unreadCount = 1; // Simplistic count: 1 if last message unread by current user
-                                    // For full unread count, you'd query Message collection for unread messages
+            if (chat.lastMessage) {
+                if (chat.lastMessage.sender) {
+                    if (chat.lastMessage.sender._id) {
+                        console.log(`[BACKEND CHATS] Comparing sender ID: ${chat.lastMessage.sender._id.toString()} with user ID: ${req.user.id.toString()}`);
+                        if (chat.lastMessage.sender._id.toString() !== req.user.id.toString()) {
+                            if (Array.isArray(chat.lastMessage.readBy) && !chat.lastMessage.readBy.includes(req.user.id)) {
+                                unreadCount = 1;
+                            }
+                        }
+                    } else {
+                        console.warn(`[BACKEND CHATS] Warning: chat.lastMessage.sender exists but sender._id is missing/null for chat ID: ${chat._id}`);
+                    }
+                } else {
+                    console.warn(`[BACKEND CHATS] Warning: chat.lastMessage exists but sender is missing/null for chat ID: ${chat._id}`);
                 }
+            } else {
+                console.log(`[BACKEND CHATS] No lastMessage for chat ID: ${chat._id}. unreadCount remains 0.`);
             }
 
             return {
-                _id: chat._id,
+                _id: chat._id?.toString(),
                 name: chat.name,
                 type: chat.type,
-                participants: chat.participants, // Keep full participant list for ChatWindow
-                admins: chat.admins,
-                createdAt: chat.createdAt,
-                updatedAt: chat.updatedAt,
-                recipient: recipient ? { // Add recipient for private chats
-                    _id: recipient._id,
+                participants: Array.isArray(chat.participants) ? chat.participants.map(p => ({
+                    _id: p?._id?.toString(),
+                    username: p?.username,
+                    profilePicture: p?.profilePicture || null,
+                })).filter(p => p._id) : [],
+                admins: Array.isArray(chat.admins) ? chat.admins.map(a => a?.toString()).filter(Boolean) : [],
+                createdAt: chat.createdAt?.toISOString(),
+                updatedAt: chat.updatedAt?.toISOString(),
+                recipient: recipient ? {
+                    _id: recipient._id?.toString(),
                     username: recipient.username,
                     profilePicture: recipient.profilePicture
                 } : null,
                 lastMessage: chat.lastMessage ? {
-                    _id: chat.lastMessage._id.toString(),
-                    sender: {
-                        _id: chat.lastMessage.sender._id.toString(),
-                        username: chat.lastMessage.sender.username,
-                        profilePicture: chat.lastMessage.sender.profilePicture,
-                    },
+                    _id: chat.lastMessage._id?.toString(),
+                    sender: chat.lastMessage.sender ? {
+                        _id: chat.lastMessage.sender?._id?.toString(),
+                        username: chat.lastMessage.sender?.username,
+                        profilePicture: chat.lastMessage.sender?.profilePicture || null,
+                    } : null,
                     content: chat.lastMessage.content,
-                    readBy: chat.lastMessage.readBy ? chat.lastMessage.readBy.map(id => id.toString()) : [],
-                    createdAt: chat.lastMessage.createdAt.toISOString(),
-                    updatedAt: chat.lastMessage.updatedAt.toISOString(),
+                    readBy: Array.isArray(chat.lastMessage.readBy) ? chat.lastMessage.readBy.map(id => id?.toString()).filter(Boolean) : [],
+                    createdAt: chat.lastMessage.createdAt?.toISOString(),
+                    updatedAt: chat.lastMessage.updatedAt?.toISOString(),
                 } : null,
-                unreadCount: unreadCount, // Add unread count
+                unreadCount: unreadCount,
             };
-        });
+        }).filter(Boolean);
 
         res.json(formattedChats);
     } catch (err) {
-        console.error('Error fetching chats:', err.message);
-        res.status(500).send('Server Error');
+        console.error('Error fetching chats (outer catch):', err.message);
+        console.error('Error stack (outer catch):', err.stack);
+        res.status(500).json({ message: 'Server Error fetching chats.', error: err.message, stack: process.env.NODE_ENV === 'development' ? err.stack : undefined });
     }
 });
+
 
 // @route   POST /api/chats
 // @desc    Create a new chat (private or group)
@@ -157,7 +243,7 @@ router.post('/', authMiddleware, async (req, res) => {
                         _id: p._id.toString(),
                         username: p.username,
                         profilePicture: p.profilePicture
-                })),
+                    })),
                     admins: savedChat.admins.map(id => id.toString()),
                     createdAt: savedChat.createdAt.toISOString(),
                     updatedAt: savedChat.updatedAt.toISOString(),
@@ -170,7 +256,7 @@ router.post('/', authMiddleware, async (req, res) => {
         res.status(201).json({ message: 'Chat created successfully', chat: savedChat });
     } catch (err) {
         console.error('Error creating chat:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error creating chat.', error: err.message });
     }
 });
 
@@ -202,7 +288,7 @@ router.get('/:chatId/messages', authMiddleware, async (req, res) => {
         res.status(200).json(messages);
     } catch (err) {
         console.error('Error fetching messages:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error fetching messages.', error: err.message });
     }
 });
 
@@ -230,7 +316,7 @@ router.post('/:chatId/messages', authMiddleware, async (req, res) => {
         }
 
         if (!chat.participants.map(p => p.toString()).includes(senderId.toString())) {
-             return res.status(403).json({ message: 'Not authorized to send messages to this chat' });
+               return res.status(403).json({ message: 'Not authorized to send messages to this chat' });
         }
 
         const newMessage = new Message({
@@ -302,7 +388,7 @@ router.post('/:chatId/messages', authMiddleware, async (req, res) => {
         res.status(201).json(messageData); // Send response back to sender's client
     } catch (err) {
         console.error('Error sending message:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error sending message.', error: err.message }); // Changed to JSON
     }
 });
 
@@ -340,25 +426,25 @@ router.post('/:chatId/markAsRead', authMiddleware, async (req, res) => {
             {
                 $addToSet: { readBy: userId } // Add user ID to readBy array if not already present
             },
-            { new: true } // This option is for findOneAndUpdate, not updateMany. It won't hurt, but it's not effective here.
+            // { new: true } // This option is for findOneAndUpdate, not updateMany. It won't hurt, but it's not effective here.
         );
 
         // Optionally, emit a socket event to update unread counts on other devices/users
         if (req.io) {
-             // Emit to the user who just marked messages as read, to update their unread count badge
-             req.io.to(`user_${userId.toString()}`).emit('chatRead', { chatId: chatId.toString() });
+            // Emit to the user who just marked messages as read, to update their unread count badge
+            req.io.to(`user_${userId.toString()}`).emit('chatRead', { chatId: chatId.toString() });
 
-             // The following line would be around line 183 if no extra lines were added.
-             // If you have `await newMessage.populate('sender', 'username profilePicture');`
-             // or similar here, that's what caused the ReferenceError.
-             // It should NOT be here.
+            // The following line would be around line 183 if no extra lines were added.
+            // If you have `await newMessage.populate('sender', 'username profilePicture');`
+            // or similar here, that's what caused the ReferenceError.
+            // It should NOT be here.
         }
 
         res.status(200).json({ message: 'Messages marked as read successfully', updatedCount: result.modifiedCount });
 
     } catch (err) {
         console.error('Error marking messages as read:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error marking messages as read.', error: err.message }); // Changed to JSON
     }
 });
 
@@ -393,13 +479,13 @@ router.get('/:chatId/members', authMiddleware, async (req, res) => {
             _id: p._id.toString(),
             username: p.username,
             profilePicture: p.profilePicture,
-            isAdmin: chat.admins.some(adminId => adminId.toString() === p._id.toString())
+            isAdmin: chat.admins.some(adminId => adminId && adminId.toString() === p._id.toString()) // Added adminId check
         }));
 
         res.status(200).json(membersWithAdminStatus);
     } catch (err) {
         console.error('Error fetching group members:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error fetching group members.', error: err.message }); // Changed to JSON
     }
 });
 
@@ -450,7 +536,7 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
 
         // Emit update to all affected users (new members and existing members)
         if (req.io) {
-            const addedUsers = chat.participants.filter(p => uniqueNewMemberIds.includes(p._id.toString()));
+            const addedUsers = await User.find({ _id: { $in: uniqueNewMemberIds } }); // Fetch full user objects for message
             const messageContent = `${req.user.username} added ${addedUsers.map(u => u.username).join(', ')} to the group.`;
 
             // Create a system message for the chat about members being added
@@ -506,7 +592,7 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
         res.status(200).json({ message: 'Members added successfully.', chat });
     } catch (err) {
         console.error('Error adding members:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error adding members.', error: err.message }); // Changed to JSON
     }
 });
 
@@ -543,7 +629,7 @@ router.delete('/:chatId/members/:memberIdToRemove', authMiddleware, async (req, 
         chat.admins = chat.admins.filter(id => id.toString() !== memberIdToRemove.toString()); // Remove from admins if they were one
 
         if (chat.participants.length === initialParticipantsCount) {
-             return res.status(404).json({ message: 'Member not found in this chat.' });
+               return res.status(404).json({ message: 'Member not found in this chat.' });
         }
 
         // If the chat becomes empty after removal, you might want to delete it or keep it
@@ -587,49 +673,197 @@ router.delete('/:chatId/members/:memberIdToRemove', authMiddleware, async (req, 
             // Emit the system message to the chat room
             req.io.to(chatId.toString()).emit('receive_message', systemMessageData);
 
-            // Emit 'chatUpdated' to remaining participants and the removed user
-            // For the removed user, emit 'chatDeleted' to remove it from their list
-            const allAffectedUsers = [...chat.participants.map(p => p._id.toString()), memberIdToRemove];
-
-            allAffectedUsers.forEach(participantId => {
-                if (participantId === memberIdToRemove) {
-                    req.io.to(`user_${participantId}`).emit('chatDeleted', chatId.toString());
-                } else {
-                    req.io.to(`user_${participantId}`).emit('chatUpdated', {
-                        _id: chat._id.toString(),
-                        name: chat.name,
-                        type: chat.type,
-                        participants: chat.participants.map(p => ({
-                            _id: p._id.toString(),
-                            username: p.username,
-                            profilePicture: p.profilePicture
-                        })),
-                        admins: chat.admins.map(id => id.toString()),
-                        lastMessage: { // Update last message to the system message
-                             sender: { _id: systemMessage.sender._id.toString(), username: systemMessage.sender.username, profilePicture: systemMessage.sender.profilePicture },
-                             content: systemMessage.content,
-                             timestamp: systemMessage.createdAt.toISOString()
-                        },
-                        updatedAt: chat.updatedAt.toISOString(),
-                    });
-                }
+            // Emit 'chatUpdated' to remaining participants
+            chat.participants.forEach(participant => {
+                req.io.to(`user_${participant._id.toString()}`).emit('chatUpdated', {
+                    _id: chat._id.toString(),
+                    name: chat.name,
+                    type: chat.type,
+                    participants: chat.participants.map(p => ({
+                        _id: p._id.toString(),
+                        username: p.username,
+                        profilePicture: p.profilePicture
+                    })),
+                    admins: chat.admins.map(id => id.toString()),
+                    lastMessage: {
+                        sender: { _id: systemMessage.sender._id.toString(), username: systemMessage.sender.username, profilePicture: systemMessage.sender.profilePicture },
+                        content: systemMessage.content,
+                        timestamp: systemMessage.createdAt.toISOString()
+                    },
+                    updatedAt: chat.updatedAt.toISOString(),
+                });
             });
 
-             // Also, if the removed user was in the chat room, make their socket leave
-             if (req.io.sockets.adapter.rooms.get(chatId.toString())) {
-                 req.io.sockets.adapter.rooms.get(chatId.toString()).forEach(socketId => {
-                     const s = req.io.sockets.sockets.get(socketId);
-                     if (s && s.userId === memberIdToRemove) { // Assuming you set socket.userId on connect
-                         s.leave(chatId.toString());
-                     }
-                 });
-             }
+            // Emit 'chatDeleted' or similar to the removed user so their chat list can update
+            req.io.to(`user_${memberIdToRemove}`).emit('chatRemoved', { chatId: chatId.toString() });
         }
 
         res.status(200).json({ message: 'Member removed successfully.', chat });
     } catch (err) {
         console.error('Error removing member:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error removing member.', error: err.message });
+    }
+});
+
+
+// @route   PUT /api/chats/hide/:chatId
+// @desc    Hide a private chat for the authenticated user
+// @access  Private
+router.put('/hide/:chatId', authMiddleware, async (req, res) => {
+    const { chatId } = req.params;
+    const userId = req.user.id;
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ message: 'Invalid chat ID format.' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId);
+
+        if (!chat) {
+            return res.status(404).json({ message: 'Chat not found.' });
+        }
+
+        if (chat.type !== 'private') {
+            return res.status(400).json({ message: 'Only private chats can be hidden.' });
+        }
+
+        if (!chat.participants.includes(userId)) {
+            return res.status(403).json({ message: 'Not authorized to hide this chat.' });
+        }
+
+        // Add userId to the hiddenBy array (if not already present)
+        if (!chat.hiddenBy.includes(userId)) {
+            chat.hiddenBy.push(userId);
+            await chat.save();
+        }
+
+        res.status(200).json({ message: 'Chat hidden successfully.' });
+    } catch (err) {
+        console.error('Error hiding chat:', err.message);
+        res.status(500).json({ message: 'Server Error hiding chat.', error: err.message });
+    }
+});
+
+
+// @route   PUT /api/chats/leave/:chatId
+// @desc    Allow a user to leave a group chat
+// @access  Private
+router.put('/leave/:chatId', authMiddleware, async (req, res) => {
+    const { chatId } = req.params;
+    const userId = req.user.id;
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ message: 'Invalid chat ID format.' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId);
+
+        if (!chat) {
+            return res.status(404).json({ message: 'Chat not found.' });
+        }
+
+        if (chat.type !== 'group') {
+            return res.status(400).json({ message: 'Only group chats can be left.' });
+        }
+
+        const initialParticipantsCount = chat.participants.length;
+
+        // Remove user from participants
+        chat.participants = chat.participants.filter(id => id.toString() !== userId.toString());
+        // Remove user from admins if they were one
+        chat.admins = chat.admins.filter(id => id.toString() !== userId.toString());
+
+        if (chat.participants.length === initialParticipantsCount) {
+            // User was not found in participants, but we still return 200 for idempotency
+            return res.status(200).json({ message: 'You are not a participant of this chat.' });
+        }
+
+        // If the user was the last admin, assign a new admin (e.g., the oldest participant)
+        if (chat.admins.length === 0 && chat.participants.length > 0) {
+            const oldestParticipant = chat.participants[0]; // Or some other logic
+            chat.admins.push(oldestParticipant);
+            console.log(`[BACKEND CHATS] User ${userId} was the last admin of chat ${chatId}. Assigning ${oldestParticipant} as new admin.`);
+        }
+
+        // If the chat becomes empty after the user leaves, you might want to delete it
+        if (chat.participants.length === 0) {
+            await Chat.findByIdAndDelete(chatId);
+            console.log(`[BACKEND CHATS] Chat ${chatId} is now empty after user ${userId} left. Deleting chat.`);
+            // Emit chatDeleted to the user who just left
+            if (req.io) {
+                req.io.to(`user_${userId.toString()}`).emit('chatDeleted', { chatId: chatId.toString() });
+            }
+            return res.status(200).json({ message: 'Successfully left chat, and chat was deleted as it became empty.' });
+        }
+
+        chat.updatedAt = Date.now();
+        await chat.save();
+
+        await chat.populate('participants', 'username profilePicture'); // Populate for socket emit
+
+        // Emit update to remaining participants
+        if (req.io) {
+            const leavingUser = await User.findById(userId); // Get user info for system message
+            const messageContent = `${leavingUser ? leavingUser.username : 'A user'} has left the group.`;
+
+            // Create a system message for the chat about the user leaving
+            const systemMessage = new Message({
+                chat: chatId,
+                sender: userId, // Or a designated system user ID
+                content: messageContent,
+                isSystemMessage: true, // Mark as system message
+            });
+            await systemMessage.save();
+            await systemMessage.populate('sender', 'username profilePicture');
+
+            const systemMessageData = {
+                _id: systemMessage._id.toString(),
+                chat: systemMessage.chat.toString(),
+                sender: {
+                    _id: systemMessage.sender._id.toString(),
+                    username: systemMessage.sender.username,
+                    profilePicture: systemMessage.sender.profilePicture || null,
+                },
+                content: systemMessage.content,
+                isSystemMessage: true,
+                createdAt: systemMessage.createdAt.toISOString(),
+                updatedAt: systemMessage.updatedAt.toISOString(),
+            };
+
+            // Emit the system message to the chat room
+            req.io.to(chatId.toString()).emit('receive_message', systemMessageData);
+
+            // Emit 'chatUpdated' to remaining participants so their chat list can update
+            chat.participants.forEach(participant => {
+                req.io.to(`user_${participant._id.toString()}`).emit('chatUpdated', {
+                    _id: chat._id.toString(),
+                    name: chat.name,
+                    type: chat.type,
+                    participants: chat.participants.map(p => ({
+                        _id: p._id.toString(),
+                        username: p.username,
+                        profilePicture: p.profilePicture
+                    })),
+                    admins: chat.admins.map(id => id.toString()),
+                    lastMessage: {
+                        sender: { _id: systemMessage.sender._id.toString(), username: systemMessage.sender.username, profilePicture: systemMessage.sender.profilePicture },
+                        content: systemMessage.content,
+                        timestamp: systemMessage.createdAt.toISOString()
+                    },
+                    updatedAt: chat.updatedAt.toISOString(),
+                });
+            });
+
+            // Emit 'chatRemoved' to the user who just left so their chat list can update
+            req.io.to(`user_${userId.toString()}`).emit('chatRemoved', { chatId: chatId.toString() });
+        }
+
+        res.status(200).json({ message: 'Successfully left chat.' });
+    } catch (err) {
+        console.error('Error leaving chat:', err.message);
+        res.status(500).json({ message: 'Server Error leaving chat.', error: err.message });
     }
 });
 

@@ -1,13 +1,29 @@
+// models/Message.js
 const mongoose = require('mongoose');
 
 const messageSchema = new mongoose.Schema({
-    chat: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', required: true },
-    sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    content: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now },
-    readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-    type: { type: String, enum: ['text', 'image', 'video', 'document'], default: 'text' },
-    fileUrl: { type: String, default: null }
-}, { timestamps: true });
+    sender: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    chat: { // Reference to the chat this message belongs to
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Chat',
+        required: true
+    },
+    content: {
+        type: String,
+        required: true
+    },
+    readBy: [ // Array of users who have read this message
+        {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        }
+    ]
+}, { timestamps: true }); // This ensures messages have their own _id, createdAt, updatedAt
 
-module.exports = mongoose.model('Message', messageSchema);
+const Message = mongoose.model('Message', messageSchema);
+
+module.exports = Message;

@@ -8,22 +8,26 @@ const protect = require('../middleware/auth'); // Your authentication middleware
 // @route   GET /api/users/search
 // @access  Private
 router.get('/search', protect, async (req, res) => {
-    const { query } = req.query;
-    if (!query) {
+    const searchQuery = req.query.q; // Get the 'q' query parameter
+    console.log(`[BACKEND SEARCH] Search query received: '${searchQuery}'`); // Add this log
+
+    // *** THIS IS THE CRITICAL VALIDATION PART ***
+    if (!searchQuery || searchQuery.trim() === '') {
+        console.log("[BACKEND SEARCH] Validation failed: Search query is required."); // Add this log
         return res.status(400).json({ message: 'Search query is required' });
     }
+
     try {
-        // Case-insensitive search for username or email
+        // Perform the search (example: partial match on username)
         const users = await User.find({
-            $or: [
-                { username: { $regex: query, $options: 'i' } },
-                { email: { $regex: query, $options: 'i' } }
-            ]
-        }).select('-password'); // Exclude passwords
-        res.status(200).json(users);
-    } catch (error) {
-        console.error('User search error:', error);
-        res.status(500).json({ message: 'Server error during user search' });
+            username: { $regex: searchQuery, $options: 'i' } // Case-insensitive partial match
+        }).select('-password'); // Exclude password from results
+
+        console.log(`[BACKEND SEARCH] Found <span class="math-inline">\{users\.length\} users for query\: '</span>{searchQuery}'`); // Add this log
+        res.json(users);
+    } catch (err) {
+        console.error('[BACKEND SEARCH ERROR]:', err.message); // Add this log
+        res.status(500).send('Server Error');
     }
 });
 

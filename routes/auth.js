@@ -13,26 +13,22 @@ router.post('/register', async (req, res) => {
     const { username, email, password } = req.body;
 
     try {
-        // Check if user exists
         let user = await User.findOne({ email });
         if (user) {
             return res.status(400).json({ message: 'User already exists' });
         }
 
-        // Create new user
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
         user = new User({
             username,
             email,
-            password
+            password: hashedPassword
         });
-
-        // Hash password
-        const salt = await bcrypt.genSalt(10);
-        user.password = await bcrypt.hash(password, salt);
 
         await user.save();
 
-        // Create and return JWT
         const payload = {
             user: {
                 id: user.id,
@@ -45,7 +41,7 @@ router.post('/register', async (req, res) => {
         jwt.sign(
             payload,
             process.env.JWT_SECRET,
-            { expiresIn: '1h' }, // Token expires in 1 hour
+            { expiresIn: '1h' },
             (err, token) => {
                 if (err) throw err;
                 res.json({ token, message: 'Registration successful!' });
@@ -53,8 +49,8 @@ router.post('/register', async (req, res) => {
         );
 
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
+        console.error('[BACKEND REGISTER ERROR]:', err.message);
+        res.status(500).json({ message: 'Server Error during registration.', error: err.message });
     }
 });
 
@@ -62,7 +58,20 @@ router.post('/register', async (req, res) => {
 // @desc    Authenticate user & get token
 // @access  Public
 router.post('/login', async (req, res) => {
+    // --- THIS IS THE CRITICAL LOG. ENSURE IT'S HERE AND SAVED. ---
+    console.log('[BACKEND LOGIN] Request headers:', req.headers); // Add headers to see content-type
+    console.log('[BACKEND LOGIN] Raw req.body received:', req.body);
+    // --- END CRITICAL LOGS ---
+
     const { email, password } = req.body;
+
+    // Basic validation for missing fields
+    if (!email || !password) {
+        // This log will only happen if email or password are truly undefined/null after destructuring
+        console.log(`[BACKEND LOGIN] Missing email or password. Email: ${email}, Password: ${password}`);
+        return res.status(400).json({ message: 'Email and password are required.' });
+    }
+
     console.log(`[BACKEND LOGIN] Attempting login for email: ${email}`);
 
     try {
@@ -71,6 +80,9 @@ router.post('/login', async (req, res) => {
             console.log(`[BACKEND LOGIN] User not found for email: ${email}`);
             return res.status(400).json({ message: 'Invalid credentials' });
         }
+
+        console.log("Plain text password from frontend (login):", password);
+        console.log("Hashed password retrieved from DB (login):", user.password);
 
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
@@ -93,7 +105,7 @@ router.post('/login', async (req, res) => {
         });
     } catch (err) {
         console.error('[BACKEND LOGIN ERROR]:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error during login.', error: err.message });
     }
 });
 
@@ -102,15 +114,14 @@ router.post('/login', async (req, res) => {
 // @access  Private
 router.get('/me', authMiddleware, async (req, res) => {
     try {
-        // req.user is set by authMiddleware
-        const user = await User.findById(req.user.id).select('-password'); // Exclude password
+        const user = await User.findById(req.user.id).select('-password');
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
         res.json(user);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
+        console.error('[BACKEND AUTH/ME ERROR]:', err.message);
+        res.status(500).json({ message: 'Server Error getting user profile.', error: err.message });
     }
 });
 
