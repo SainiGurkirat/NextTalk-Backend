@@ -2,15 +2,55 @@
 const express = require('express');
 const router = express.Router();
 const Chat = require('../models/Chat');
-const User = require('../models/User'); // Required for populating user data
+const User = require('../models/User');
 const Message = require('../models/Message');
 const authMiddleware = require('../middleware/auth');
-const mongoose = require('mongoose'); // Make sure this import is present
+const mongoose = require('mongoose');
+const multer = require('multer'); // Import multer
+const path = require('path'); // Import path for handling file paths
+const fs = require('fs'); // Import file system for creating directories
+
+// --- Multer Configuration for File Uploads ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const uploadDir = 'uploads/'; // Directory where files will be stored
+        // Create the upload directory if it doesn't exist
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        // Generate a unique filename: fieldname-timestamp.ext
+        cb(null, file.fieldname + '-' + Date.now() + path.extname(file.originalname));
+    }
+});
+
+// File filter to accept only images, gifs, and videos
+const fileFilter = (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|mp4|mov|avi|webm/; // Add more video types as needed
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+        return cb(null, true);
+    } else {
+        cb(new Error('Only images (jpg, jpeg, png, gif) and videos (mp4, mov, avi, webm) are allowed!'), false);
+    }
+};
+
+const upload = multer({
+    storage: storage,
+    fileFilter: fileFilter,
+    limits: {
+        fileSize: 1024 * 1024 * 50 // 50 MB limit
+    }
+});
+// --- End Multer Configuration ---
 
 
 // Helper function to determine if a user is an admin of a chat
 const isAdmin = (chat, userId) => {
-    // Ensure chat.admins is an array and contains valid ObjectIds before mapping
     if (!Array.isArray(chat.admins)) {
         return false;
     }
@@ -38,26 +78,13 @@ router.get('/', authMiddleware, async (req, res) => {
                 .populate('participants', 'username profilePicture')
                 .populate({
                     path: 'lastMessage',
-                    // Adding `strictPopulate: false` here is a temporary workaround
-                    // if you suspect a bad reference, but it might just hide the problem.
-                    // A better approach is often to find and fix the bad data.
-                    // For now, let's keep the structured populate.
-                    // For now, let's keep the structured populate.
                     populate: {
                         path: 'sender',
                         select: 'username profilePicture',
-                        // This option ensures Mongoose returns null for `sender`
-                        // if the referenced user document doesn't exist, instead of throwing an error.
-                        // However, it might still throw if the `lastMessage` field itself is malformed.
-                        // We need to ensure that the _id for sender is valid before populating.
-                        // Mongoose usually handles this.
                     }
                 })
                 .sort({ updatedAt: -1 });
 
-            // CRITICAL DEBUG: If 'Raw populated chats received from DB'
-            // still does not appear, the issue is within the .populate() chain itself
-            // or directly before it, indicating bad data in the DB.
             console.log('[BACKEND CHATS] Successfully executed query. Raw populated chats received from DB:', JSON.stringify(chats, (key, value) => {
                 if (value && typeof value === 'object' && value.constructor.name === 'ObjectId') {
                     return value.toString();
@@ -80,7 +107,6 @@ router.get('/', authMiddleware, async (req, res) => {
         }
 
         const formattedChats = chats.map(chat => {
-            // ... (rest of your map function - no changes needed here as the error was before this) ...
             console.log(`[BACKEND CHATS] Mapping chat: ${chat?._id?.toString() || 'unknown ID'}`);
             console.log('[BACKEND CHATS] Current chat object:', JSON.stringify(chat, (key, value) => {
                 if (value && typeof value === 'object' && value.constructor.name === 'ObjectId') {
@@ -92,7 +118,6 @@ router.get('/', authMiddleware, async (req, res) => {
                 return value;
             }, 2));
 
-            // Ensure chat itself is an object and has an _id before proceeding
             if (!chat || !chat._id) {
                 console.warn('[BACKEND CHATS] Skipping malformed chat (no _id):', chat);
                 return null;
@@ -155,6 +180,8 @@ router.get('/', authMiddleware, async (req, res) => {
                         profilePicture: chat.lastMessage.sender?.profilePicture || null,
                     } : null,
                     content: chat.lastMessage.content,
+                    mediaUrl: chat.lastMessage.mediaUrl, // Include mediaUrl
+                    mediaType: chat.lastMessage.mediaType, // Include mediaType
                     readBy: Array.isArray(chat.lastMessage.readBy) ? chat.lastMessage.readBy.map(id => id?.toString()).filter(Boolean) : [],
                     createdAt: chat.lastMessage.createdAt?.toISOString(),
                     updatedAt: chat.lastMessage.updatedAt?.toISOString(),
@@ -294,16 +321,36 @@ router.get('/:chatId/messages', authMiddleware, async (req, res) => {
 
 
 // @route   POST /api/chats/:chatId/messages
-// @desc    Send a new message to a chat
+// @desc    Send a new message to a chat (can include media)
 // @access  Private
-router.post('/:chatId/messages', authMiddleware, async (req, res) => {
-    const { content } = req.body;
+// We use upload.single('media') to handle a single file upload named 'media'
+router.post('/:chatId/messages', authMiddleware, upload.single('media'), async (req, res) => {
+    const { content } = req.body; // content might be empty if only media is sent
     const chatId = req.params.chatId;
     const senderId = req.user.id;
+    const file = req.file; // Multer adds the file object here
 
-    if (!content || content.trim() === '') {
-        return res.status(400).json({ message: 'Message content cannot be empty' });
+    let mediaUrl = null;
+    let mediaType = null;
+
+    if (file) {
+        // Construct the URL to access the uploaded file
+        // Assuming your backend is served on localhost:5000 and uploads are in /uploads
+        mediaUrl = `/uploads/${file.filename}`;
+        
+        // Determine media type based on mimetype
+        if (file.mimetype.startsWith('image/')) {
+            mediaType = file.mimetype.includes('gif') ? 'gif' : 'image';
+        } else if (file.mimetype.startsWith('video/')) {
+            mediaType = 'video';
+        }
     }
+
+    // Validate that either content or a file is provided
+    if (!content && !file) {
+        return res.status(400).json({ message: 'Message must have either content or an attachment.' });
+    }
+
     if (!mongoose.Types.ObjectId.isValid(chatId)) {
         return res.status(400).json({ message: 'Invalid chat ID format' });
     }
@@ -323,6 +370,8 @@ router.post('/:chatId/messages', authMiddleware, async (req, res) => {
             chat: chatId,
             sender: senderId,
             content,
+            mediaUrl,   // Assign mediaUrl
+            mediaType   // Assign mediaType
         });
 
         const savedMessage = await newMessage.save();
@@ -344,6 +393,8 @@ router.post('/:chatId/messages', authMiddleware, async (req, res) => {
                 profilePicture: savedMessage.sender.profilePicture || null,
             },
             content: savedMessage.content,
+            mediaUrl: savedMessage.mediaUrl,    // Include mediaUrl in emitted data
+            mediaType: savedMessage.mediaType,  // Include mediaType in emitted data
             readBy: savedMessage.readBy ? savedMessage.readBy.map(id => id.toString()) : [],
             createdAt: savedMessage.createdAt.toISOString(),
             updatedAt: savedMessage.updatedAt.toISOString(),
@@ -378,6 +429,8 @@ router.post('/:chatId/messages', authMiddleware, async (req, res) => {
                             profilePicture: messageData.sender.profilePicture
                         },
                         content: messageData.content,
+                        mediaUrl: messageData.mediaUrl, // Include mediaUrl for lastMessage
+                        mediaType: messageData.mediaType, // Include mediaType for lastMessage
                         timestamp: messageData.createdAt
                     },
                     updatedAt: chat.updatedAt.toISOString(),
@@ -426,25 +479,17 @@ router.post('/:chatId/markAsRead', authMiddleware, async (req, res) => {
             {
                 $addToSet: { readBy: userId } // Add user ID to readBy array if not already present
             },
-            // { new: true } // This option is for findOneAndUpdate, not updateMany. It won't hurt, but it's not effective here.
         );
 
-        // Optionally, emit a socket event to update unread counts on other devices/users
         if (req.io) {
-            // Emit to the user who just marked messages as read, to update their unread count badge
             req.io.to(`user_${userId.toString()}`).emit('chatRead', { chatId: chatId.toString() });
-
-            // The following line would be around line 183 if no extra lines were added.
-            // If you have `await newMessage.populate('sender', 'username profilePicture');`
-            // or similar here, that's what caused the ReferenceError.
-            // It should NOT be here.
         }
 
         res.status(200).json({ message: 'Messages marked as read successfully', updatedCount: result.modifiedCount });
 
     } catch (err) {
         console.error('Error marking messages as read:', err.message);
-        res.status(500).json({ message: 'Server Error marking messages as read.', error: err.message }); // Changed to JSON
+        res.status(500).json({ message: 'Server Error marking messages as read.', error: err.message });
     }
 });
 
@@ -479,13 +524,13 @@ router.get('/:chatId/members', authMiddleware, async (req, res) => {
             _id: p._id.toString(),
             username: p.username,
             profilePicture: p.profilePicture,
-            isAdmin: chat.admins.some(adminId => adminId && adminId.toString() === p._id.toString()) // Added adminId check
+            isAdmin: chat.admins.some(adminId => adminId && adminId.toString() === p._id.toString())
         }));
 
         res.status(200).json(membersWithAdminStatus);
     } catch (err) {
         console.error('Error fetching group members:', err.message);
-        res.status(500).json({ message: 'Server Error fetching group members.', error: err.message }); // Changed to JSON
+        res.status(500).json({ message: 'Server Error fetching group members.', error: err.message });
     }
 });
 
@@ -526,28 +571,24 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
             return res.status(200).json({ message: 'All provided users are already members.', chat });
         }
 
-        // Add unique new members to the participants array
         chat.participants.push(...uniqueNewMemberIds);
         chat.updatedAt = Date.now();
         await chat.save();
 
-        // Populate participants for the response and socket emit
         await chat.populate('participants', 'username profilePicture');
 
-        // Emit update to all affected users (new members and existing members)
         if (req.io) {
-            const addedUsers = await User.find({ _id: { $in: uniqueNewMemberIds } }); // Fetch full user objects for message
+            const addedUsers = await User.find({ _id: { $in: uniqueNewMemberIds } });
             const messageContent = `${req.user.username} added ${addedUsers.map(u => u.username).join(', ')} to the group.`;
 
-            // Create a system message for the chat about members being added
             const systemMessage = new Message({
                 chat: chatId,
-                sender: req.user.id, // Or a designated system user ID
+                sender: req.user.id,
                 content: messageContent,
-                isSystemMessage: true, // Mark as system message
+                isSystemMessage: true,
             });
             await systemMessage.save();
-            await systemMessage.populate('sender', 'username profilePicture'); // Populate sender for socket
+            await systemMessage.populate('sender', 'username profilePicture');
 
             const systemMessageData = {
                 _id: systemMessage._id.toString(),
@@ -563,11 +604,8 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
                 updatedAt: systemMessage.updatedAt.toISOString(),
             };
 
-            // Emit the system message to the chat room
             req.io.to(chatId.toString()).emit('receive_message', systemMessageData);
 
-            // Emit 'chatUpdated' to all participants (old and new)
-            // This is crucial to update the chat list and participants list
             chat.participants.forEach(participant => {
                 req.io.to(`user_${participant._id.toString()}`).emit('chatUpdated', {
                     _id: chat._id.toString(),
@@ -579,7 +617,7 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
                         profilePicture: p.profilePicture
                     })),
                     admins: chat.admins.map(id => id.toString()),
-                    lastMessage: { // Update last message to the system message
+                    lastMessage: {
                          sender: { _id: systemMessage.sender._id.toString(), username: systemMessage.sender.username, profilePicture: systemMessage.sender.profilePicture },
                          content: systemMessage.content,
                          timestamp: systemMessage.createdAt.toISOString()
@@ -592,7 +630,7 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
         res.status(200).json({ message: 'Members added successfully.', chat });
     } catch (err) {
         console.error('Error adding members:', err.message);
-        res.status(500).json({ message: 'Server Error adding members.', error: err.message }); // Changed to JSON
+        res.status(500).json({ message: 'Server Error adding members.', error: err.message });
     }
 });
 
@@ -626,32 +664,26 @@ router.delete('/:chatId/members/:memberIdToRemove', authMiddleware, async (req, 
 
         const initialParticipantsCount = chat.participants.length;
         chat.participants = chat.participants.filter(id => id.toString() !== memberIdToRemove.toString());
-        chat.admins = chat.admins.filter(id => id.toString() !== memberIdToRemove.toString()); // Remove from admins if they were one
+        chat.admins = chat.admins.filter(id => id.toString() !== memberIdToRemove.toString());
 
         if (chat.participants.length === initialParticipantsCount) {
                return res.status(404).json({ message: 'Member not found in this chat.' });
         }
 
-        // If the chat becomes empty after removal, you might want to delete it or keep it
-        // For simplicity, let's just save for now. If participants array is empty, it will be an empty chat.
-        // Optional: if (chat.participants.length === 0) await Chat.findByIdAndDelete(chatId);
-
         chat.updatedAt = Date.now();
         await chat.save();
 
-        await chat.populate('participants', 'username profilePicture'); // Populate for response and socket
+        await chat.populate('participants', 'username profilePicture');
 
-        // Emit update to all affected users
         if (req.io) {
-            const removedUser = await User.findById(memberIdToRemove); // Get user info for system message
+            const removedUser = await User.findById(memberIdToRemove);
             const messageContent = `${req.user.username} removed ${removedUser ? removedUser.username : 'a user'} from the group.`;
 
-            // Create a system message for the chat about members being removed
             const systemMessage = new Message({
                 chat: chatId,
-                sender: req.user.id, // Or a designated system user ID
+                sender: req.user.id,
                 content: messageContent,
-                isSystemMessage: true, // Mark as system message
+                isSystemMessage: true,
             });
             await systemMessage.save();
             await systemMessage.populate('sender', 'username profilePicture');
@@ -670,10 +702,8 @@ router.delete('/:chatId/members/:memberIdToRemove', authMiddleware, async (req, 
                 updatedAt: systemMessage.updatedAt.toISOString(),
             };
 
-            // Emit the system message to the chat room
             req.io.to(chatId.toString()).emit('receive_message', systemMessageData);
 
-            // Emit 'chatUpdated' to remaining participants
             chat.participants.forEach(participant => {
                 req.io.to(`user_${participant._id.toString()}`).emit('chatUpdated', {
                     _id: chat._id.toString(),
@@ -694,7 +724,6 @@ router.delete('/:chatId/members/:memberIdToRemove', authMiddleware, async (req, 
                 });
             });
 
-            // Emit 'chatDeleted' or similar to the removed user so their chat list can update
             req.io.to(`user_${memberIdToRemove}`).emit('chatRemoved', { chatId: chatId.toString() });
         }
 
@@ -801,19 +830,18 @@ router.put('/leave/:chatId', authMiddleware, async (req, res) => {
         chat.updatedAt = Date.now();
         await chat.save();
 
-        await chat.populate('participants', 'username profilePicture'); // Populate for socket emit
+        await chat.populate('participants', 'username profilePicture');
 
         // Emit update to remaining participants
         if (req.io) {
-            const leavingUser = await User.findById(userId); // Get user info for system message
+            const leavingUser = await User.findById(userId);
             const messageContent = `${leavingUser ? leavingUser.username : 'A user'} has left the group.`;
 
-            // Create a system message for the chat about the user leaving
             const systemMessage = new Message({
                 chat: chatId,
-                sender: userId, // Or a designated system user ID
+                sender: userId,
                 content: messageContent,
-                isSystemMessage: true, // Mark as system message
+                isSystemMessage: true,
             });
             await systemMessage.save();
             await systemMessage.populate('sender', 'username profilePicture');
@@ -832,10 +860,8 @@ router.put('/leave/:chatId', authMiddleware, async (req, res) => {
                 updatedAt: systemMessage.updatedAt.toISOString(),
             };
 
-            // Emit the system message to the chat room
             req.io.to(chatId.toString()).emit('receive_message', systemMessageData);
 
-            // Emit 'chatUpdated' to remaining participants so their chat list can update
             chat.participants.forEach(participant => {
                 req.io.to(`user_${participant._id.toString()}`).emit('chatUpdated', {
                     _id: chat._id.toString(),
@@ -856,7 +882,6 @@ router.put('/leave/:chatId', authMiddleware, async (req, res) => {
                 });
             });
 
-            // Emit 'chatRemoved' to the user who just left so their chat list can update
             req.io.to(`user_${userId.toString()}`).emit('chatRemoved', { chatId: chatId.toString() });
         }
 

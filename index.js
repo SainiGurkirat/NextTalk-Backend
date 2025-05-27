@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const http = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const path = require('path'); // <--- ADD THIS LINE
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -64,6 +65,7 @@ app.use((req, res, next) => {
 // ************************************************************
 
 // Define API Routes
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/chats', chatRoutes);
