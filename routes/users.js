@@ -102,14 +102,17 @@ router.put('/profile-picture', protect, upload.single('profilePicture'), async (
         }
 
         // Delete old profile picture if it exists and is not a default/placeholder
-        const oldImagePath = path.join(__dirname, '..', user.profilePicture.replace(/^\/+/, ''));
-        fs.unlink(oldImagePath, (err) => {
-            if (err) {
-                console.error(`Error deleting old profile picture at ${oldImagePath}:`, err.message);
-            } else {
-                console.log(`Deleted old profile picture at ${oldImagePath}`);
-            }
-        });
+        if (user.profilePicture && user.profilePicture !== '/uploads/profile_pictures/default.png') {
+            const oldImagePath = path.join(__dirname, '..', user.profilePicture.replace(/^\/+/, ''));
+                    fs.unlink(oldImagePath, (err) => {
+                        if (err) {
+                            console.error(`Error deleting old profile picture at ${oldImagePath}:`, err.message);
+                        } else {
+                            console.log(`Deleted old profile picture at ${oldImagePath}`);
+                        }
+                    });
+            }
+        
 
         // Store relative path (e.g., /uploads/profile_pictures/filename.png) for frontend to fetch from backend
         const relativePath = `/uploads/profile_pictures/${req.file.filename}`;
