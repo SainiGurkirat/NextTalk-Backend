@@ -11,11 +11,18 @@ const authMiddleware = require('../middleware/auth');
 // @access  Public
 router.post('/register', async (req, res) => {
     const { username, email, password } = req.body;
+    if (password.length < 6) {
+        return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
+    }
 
     try {
-        let user = await User.findOne({ email });
-        if (user) {
-            return res.status(400).json({ message: 'User already exists' });
+        let userEmail = await User.findOne({ email });
+        let userUsername = await User.findOne({ username });
+        if (userUsername) {
+            return res.status(400).json({ message: 'Username already exists' });
+        }
+        if (userEmail) {
+            return res.status(400).json({ message: 'Email already exists' });
         }
 
         const salt = await bcrypt.genSalt(10);
