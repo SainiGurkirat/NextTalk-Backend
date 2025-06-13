@@ -1,4 +1,3 @@
-// backend/models/Chat.js
 const mongoose = require('mongoose');
 
 const ChatSchema = new mongoose.Schema({
@@ -17,7 +16,7 @@ const ChatSchema = new mongoose.Schema({
     name: {
         type: String,
         trim: true,
-        // Required only for group chats
+        // required only for group chats
         required: function() {
             return this.type === 'group';
         }
@@ -27,14 +26,16 @@ const ChatSchema = new mongoose.Schema({
         ref: 'Message',
         default: null
     },
-    // For group chats, to manage administrators
+
+    // for group chats. to manage administrators
     admins: [
         {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User'
         }
     ],
-    // New field to track who has hidden a private chat
+
+    // new field to track who has hidden a private chat
     hiddenBy: [
         {
             type: mongoose.Schema.Types.ObjectId,
@@ -42,20 +43,19 @@ const ChatSchema = new mongoose.Schema({
         }
     ]
 }, {
-    timestamps: true // Adds createdAt and updatedAt timestamps
+    timestamps: true
 });
 
-// Ensure that 'name' is not required for private chats, and 'name' is unique if it exists
+
 ChatSchema.path('name').validate(function(value) {
     if (this.type === 'private') {
-        return true; // Not required for private chats
+        return true; // not required for private chats
     }
-    // For group chats, name is required
+    // for group chats. name is required
     return value && value.length > 0;
 }, 'Group chat requires a name.');
 
 
-// Pre-save hook to ensure hiddenBy is initialized as an empty array if not present
 ChatSchema.pre('save', function(next) {
     if (!this.hiddenBy) {
         this.hiddenBy = [];

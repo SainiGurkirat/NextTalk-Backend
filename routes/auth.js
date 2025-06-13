@@ -1,4 +1,3 @@
-// backend/routes/auth.js
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
@@ -6,36 +5,38 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const authMiddleware = require('../middleware/auth');
 
-// @route   POST /api/auth/register
-// @desc    Register user
-// @access  Public
+// handle user registration
 router.post('/register', async (req, res) => {
     const { username, email, password } = req.body;
     if (password.length < 6) {
-        return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
+        return res.status(400).json({ message: 'password must be at least 6 characters long.' });
     }
 
     try {
         let userEmail = await User.findOne({ email });
         let userUsername = await User.findOne({ username });
         if (userUsername) {
-            return res.status(400).json({ message: 'Username already exists' });
+            return res.status(400).json({ message: 'username already exists' });
         }
         if (userEmail) {
-            return res.status(400).json({ message: 'Email already exists' });
+            return res.status(400).json({ message: 'email already exists' });
         }
 
+        // hash the password
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
+        // create a new user instance
         user = new User({
             username,
             email,
             password: hashedPassword
         });
 
+        // save the user to the database
         await user.save();
 
+        // create jwt payload
         const payload = {
             user: {
                 id: user.id,
@@ -45,62 +46,49 @@ router.post('/register', async (req, res) => {
             }
         };
 
+        // sign the jwt token
         jwt.sign(
             payload,
             process.env.JWT_SECRET,
             { expiresIn: '1h' },
             (err, token) => {
                 if (err) throw err;
-                res.json({ token, message: 'Registration successful!' });
+                res.json({ token, message: 'registration successful!' });
             }
         );
 
     } catch (err) {
-        console.error('[BACKEND REGISTER ERROR]:', err.message);
-        res.status(500).json({ message: 'Server Error during registration.', error: err.message });
+        console.error('[backend register error]:', err.message);
+        res.status(500).json({ message: 'server error during registration.', error: err.message });
     }
 });
 
-// @route   POST /api/auth/login
-// @desc    Authenticate user & get token
-// @access  Public
+// handle user login and token generation
 router.post('/login', async (req, res) => {
-    // --- THIS IS THE CRITICAL LOG. ENSURE IT'S HERE AND SAVED. ---
-    console.log('[BACKEND LOGIN] Request headers:', req.headers); // Add headers to see content-type
-    console.log('[BACKEND LOGIN] Raw req.body received:', req.body);
-    // --- END CRITICAL LOGS ---
-
     const { email, password } = req.body;
 
-    // Basic validation for missing fields
+    // basic validation for missing fields
     if (!email || !password) {
-        // This log will only happen if email or password are truly undefined/null after destructuring
-        console.log(`[BACKEND LOGIN] Missing email or password. Email: ${email}, Password: ${password}`);
-        return res.status(400).json({ message: 'Email and password are required.' });
+        return res.status(400).json({ message: 'email and password are required.' });
     }
 
-    console.log(`[BACKEND LOGIN] Attempting login for email: ${email}`);
-
     try {
+        // find user by email
         const user = await User.findOne({ email });
         if (!user) {
-            console.log(`[BACKEND LOGIN] User not found for email: ${email}`);
-            return res.status(400).json({ message: 'Invalid credentials' });
+            return res.status(400).json({ message: 'invalid credentials' });
         }
 
-        console.log("Plain text password from frontend (login):", password);
-        console.log("Hashed password retrieved from DB (login):", user.password);
-
+        // compare provided password with hashed password
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
-            console.log(`[BACKEND LOGIN] Password mismatch for user: ${email}`);
-            return res.status(400).json({ message: 'Invalid credentials' });
+            return res.status(400).json({ message: 'invalid credentials' });
         }
 
+        // generate jwt token
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        console.log(`[BACKEND LOGIN] User ${user.username} logged in. Token generated: ${token ? 'YES' : 'NO'}`);
-        console.log(`[BACKEND LOGIN] Sending response with token for user: ${user.username}`);
 
+        // send token and user info in response
         res.json({
             token,
             user: {
@@ -111,24 +99,23 @@ router.post('/login', async (req, res) => {
             }
         });
     } catch (err) {
-        console.error('[BACKEND LOGIN ERROR]:', err.message);
-        res.status(500).json({ message: 'Server Error during login.', error: err.message });
+        console.error('[backend login error]:', err.message);
+        res.status(500).json({ message: 'server error during login.', error: err.message });
     }
 });
 
-// @route   GET /api/auth/me
-// @desc    Get authenticated user profile
-// @access  Private
+// get authenticated user profile
 router.get('/me', authMiddleware, async (req, res) => {
     try {
+        // find user by id from the authenticated request
         const user = await User.findById(req.user.id).select('-password');
         if (!user) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ message: 'user not found' });
         }
         res.json(user);
     } catch (err) {
-        console.error('[BACKEND AUTH/ME ERROR]:', err.message);
-        res.status(500).json({ message: 'Server Error getting user profile.', error: err.message });
+        console.error('[backend auth/me error]:', err.message);
+        res.status(500).json({ message: 'server error getting user profile.', error: err.message });
     }
 });
 
